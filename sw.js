@@ -1,4 +1,4 @@
-const CACHE = 'novel-library-app-v8';
+const CACHE = 'novel-library-app-v9';
 const ASSETS = ['./', './index.html', './app.js', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png', './icons/like-empty.svg', './icons/like-filled.svg', './icons/dislike-empty.svg', './icons/dislike-filled.svg', './icons/open-book.svg', './icons/pencil.svg', './icons/save.svg', './icons/arrow-prev.svg', './icons/arrow-next.svg', './icons/paperclip.svg', './icons/menu.svg', './icons/add-book.svg', './icons/tag.svg', './icons/export.svg', './icons/import.svg', './icons/read-empty.svg', './icons/read-done.svg'];
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(ASSETS)));
