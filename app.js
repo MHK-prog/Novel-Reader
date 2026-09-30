@@ -2,7 +2,7 @@
 const META_KEY = 'novel-library-meta-v1';
 const DB_NAME = 'novel-library-files-v1';
 const DB_STORE = 'texts';
-const APP_VERSION = '0.0.5';
+const APP_VERSION = '0.0.6';
 let state = { books: [], tags: [] };
 let activeBookId = null;
 let activeChapterIndex = 0;
@@ -40,10 +40,10 @@ function normalizeState(value) {
   };
 }
 
-async function transformText(text, mode) {
+async function transformText(text, mode, format = 'gzip') {
   const Transformer = mode === 'compress' ? window.CompressionStream : window.DecompressionStream;
   if (!Transformer) return null;
-  const stream = new Blob([text]).stream().pipeThrough(new Transformer('gzip'));
+  const stream = new Blob([text]).stream().pipeThrough(new Transformer(format));
   return await new Response(stream).arrayBuffer();
 }
 function bytesToBase64(buffer) {
@@ -196,7 +196,7 @@ $('worksList').addEventListener('click', async event => {
 
 function tagOptionList(tags, selected, query = '') {
   const filtered = tags.filter(tag => tag.toLocaleLowerCase('fa').includes(query.trim().toLocaleLowerCase('fa')));
-  return filtered.length ? filtered.map(tag => `<label class="tag-option"><input type="checkbox" data-tag-choice="${esc(tag)}" ${selected.has(tag) ? 'checked' : ''}><span>${esc(tag)}</span></label>`).join('') : '<span class="tag-empty">تگی پیدا نشد</span>';
+  return filtered.length ? filtered.map(tag => `<label class="tag-option ${selected.has(tag) ? 'selected' : ''}"><input type="checkbox" data-tag-choice="${esc(tag)}" ${selected.has(tag) ? 'checked' : ''}><span>${esc(tag)}</span></label>`).join('') : '<span class="tag-empty">تگی پیدا نشد</span>';
 }
 function bindTagChooser(prefix, selected) {
   const search = $(`${prefix}Search`), options = $(`${prefix}Options`);
@@ -306,9 +306,21 @@ async function openReader(index) {
   showPage('reader', book.title);
   restoringScroll = true;
   requestAnimationFrame(() => {
-    $('readArea').scrollTop = chapter.scroll || 0;
+    const bounds = readerScrollBounds();
+    window.scrollTo(0, Math.max(0, bounds.start + (chapter.scroll || 0)));
     setTimeout(() => { restoringScroll = false; updateReadProgress(); }, 80);
   });
+}
+function readerScrollBounds() {
+  const article = $('readingText').getBoundingClientRect();
+  const articleTop = article.top + window.scrollY;
+  const articleBottom = article.bottom + window.scrollY;
+  const stickyHeight = $('readerSticky').offsetHeight;
+  const toolbarHeight = $('readerToolbar').offsetHeight;
+  return {
+    start: articleTop - stickyHeight,
+    end: articleBottom - window.innerHeight + toolbarHeight
+  };
 }
 function setReaderMode(mode) {
   readerMode = mode;
@@ -356,15 +368,17 @@ $('saveText').onclick = async () => {
 };
 function updateReadProgress() {
   const book = currentBook(), chapter = book?.chapters[activeChapterIndex];
-  if (!chapter || !activeText) return;
-  const area = $('readArea'), max = area.scrollHeight - area.clientHeight;
-  const pct = max <= 1 ? 100 : Math.min(100, Math.round(area.scrollTop / max * 100));
-  chapter.scroll = area.scrollTop; chapter.percent = pct;
+  if (!chapter || !activeText || readerMode !== 'read' || $('page-reader').classList.contains('hidden')) return;
+  const { start, end } = readerScrollBounds();
+  const distance = end - start;
+  const pct = distance <= 1 ? 100 : Math.max(0, Math.min(100, Math.round((window.scrollY - start) / distance * 100)));
+  chapter.scroll = Math.max(0, window.scrollY - start);
+  chapter.percent = pct;
   $('readerProgressFill').style.width = `${chapter.done ? 100 : pct}%`;
   $('readerProgressFill').classList.toggle('done', chapter.done);
   clearTimeout(scrollTimer); scrollTimer = setTimeout(() => persist(), 450);
 }
-$('readArea').onscroll = () => { if (!restoringScroll) updateReadProgress(); };
+window.addEventListener('scroll', () => { if (!restoringScroll) updateReadProgress(); }, { passive: true });
 $('readerBack').onclick = () => navigateBack('chapters');
 $('prevReaderChapter').onclick = () => { if (activeChapterIndex > 0) openReader(activeChapterIndex - 1); };
 $('nextReaderChapter').onclick = () => { const book = currentBook(); if (activeChapterIndex < book.chapters.length - 1) openReader(activeChapterIndex + 1); };
@@ -377,13 +391,33 @@ async function exportLibrary() {
     if (text) texts.push({ bookId: book.id, index, text });
   }
   const backup = { format: 'novel-reader-backup-v1', state: normalizeState(state), texts };
-  const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json;charset=utf-8' });
+  const json = JSON.stringify(backup);
+  const raw = new TextEncoder().encode(json);
+  let best = { data: raw, format: 'json' };
+  for (const format of ['brotli', 'gzip', 'deflate']) {
+    try {
+      const data = await transformText(raw, 'compress', format);
+      if (data && data.byteLength < best.data.byteLength) best = { data, format };
+    } catch {}
+  }
+  const extensions = { json: 'json', brotli: 'json.br', gzip: 'json.gz', deflate: 'json.deflate' };
+  const blob = new Blob([best.data], { type: best.format === 'gzip' ? 'application/gzip' : 'application/octet-stream' });
   const url = URL.createObjectURL(blob), link = document.createElement('a');
-  link.href = url; link.download = `novel-library-${new Date().toISOString().slice(0, 10)}.json`; link.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000); closeSidebar(); showToast('نسخه‌ی پشتیبان دریافت شد.');
+  link.href = url; link.download = `novel-library-${new Date().toISOString().slice(0, 10)}.${extensions[best.format]}`; link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000); closeSidebar();
+  const reduction = Math.max(0, Math.round((1 - best.data.byteLength / raw.byteLength) * 100));
+  showToast(best.format === 'json' ? 'پشتیبان دریافت شد.' : `پشتیبان با ${best.format} فشرده شد؛ ${fa(reduction)}٪ حجم کمتر.`);
 }
 async function importLibrary(file) {
-  const backup = JSON.parse(await file.text());
+  let json;
+  const extension = file.name.toLocaleLowerCase();
+  const format = extension.endsWith('.json.br') ? 'brotli' : extension.endsWith('.json.gz') ? 'gzip' : extension.endsWith('.json.deflate') ? 'deflate' : null;
+  if (format) {
+    const decoded = await transformText(await file.arrayBuffer(), 'decompress', format);
+    if (!decoded) throw new Error('Decompression is unavailable for this backup format.');
+    json = await new Response(decoded).text();
+  } else json = await file.text();
+  const backup = JSON.parse(json);
   if (backup.format !== 'novel-reader-backup-v1' || !Array.isArray(backup.state?.books)) throw new Error('ساختار فایل پشتیبان معتبر نیست.');
   const incoming = normalizeState(backup.state), existing = new Set(state.books.map(book => book.id));
   const additions = incoming.books.filter(book => !existing.has(book.id));
@@ -398,7 +432,7 @@ async function importLibrary(file) {
   showToast(`${fa(additions.length)} کتاب اضافه شد.`);
 }
 function importDialog() {
-  openModal('وارد کردن پشتیبان', `<form class="modal-form" id="importForm"><p class="modal-note">کتاب‌های تازه به کتابخانه اضافه می‌شوند؛ کتاب‌های موجود باقی می‌مانند.</p><div class="field"><label for="backupFile">فایل پشتیبان JSON</label><input id="backupFile" type="file" accept=".json,application/json" required></div><div class="modal-actions"><button class="button" type="button" data-modal-close>انصراف</button><button class="button primary" type="submit">وارد کردن</button></div></form>`);
+  openModal('وارد کردن پشتیبان', `<form class="modal-form" id="importForm"><p class="modal-note">کتاب‌های تازه به کتابخانه اضافه می‌شوند؛ کتاب‌های موجود باقی می‌مانند.</p><div class="field"><label for="backupFile">فایل پشتیبان</label><input id="backupFile" type="file" accept=".json,.br,.gz,.deflate,application/json,application/gzip,application/octet-stream" required></div><div class="modal-actions"><button class="button" type="button" data-modal-close>انصراف</button><button class="button primary" type="submit">وارد کردن</button></div></form>`);
   $('importForm').onsubmit = async event => {
     event.preventDefault();
     try { await importLibrary($('backupFile').files[0]); closeModal(); }
